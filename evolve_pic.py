@@ -4,9 +4,10 @@ from typing import List, Tuple
 
 from skimage.draw import polygon
 from skimage.metrics import normalized_root_mse
-from deap import base, creator, tools
+from deap import base, creator, tools, algorithms
 from PIL import Image
 import numpy as np
+import multiprocessing
 
 
 from pathlib import Path
@@ -42,6 +43,12 @@ def express_genome_to_image(individual: np.ndarray, im_shape):
     return gen_img
 
 
+# toolbox needs to be in global scope for multiprocessing to work on Windows
+toolbox = base.Toolbox()
+creator.create("FitnessMin", base.Fitness, weights=(-1.0,))
+creator.create("Individual", list, fitness=creator.FitnessMin)
+
+
 def main(input_file: Path, output_file: Path, genome_size: int, pop_size: int, generations: int):
     """
     Entry point and main logic for script to convert image to Excel file
@@ -51,60 +58,35 @@ def main(input_file: Path, output_file: Path, genome_size: int, pop_size: int, g
     :param pop_size: Size of the population to evolve
     :param generations: Number of generations to optimise over
     """
+    pool = multiprocessing.Pool(processes=16)
+    toolbox.register("map", pool.map)
     img = Image.open(input_file)
     ref_img_array = np.array(img)
 
-    creator.create("FitnessMin", base.Fitness, weights=(-1.0,))
-    creator.create("Individual", list, fitness=creator.FitnessMin)
-
-    toolbox = base.Toolbox()
     toolbox.register("attribute", random.random)
     toolbox.register("individual", tools.initRepeat, creator.Individual,
                      toolbox.attribute, n=genome_size * GENE_SIZE)
     toolbox.register("population", tools.initRepeat, list, toolbox.individual)
-
     toolbox.register("mate", tools.cxTwoPoint)
     toolbox.register("mutate", tools.mutGaussian, mu=0, sigma=0.1, indpb=0.1)
     toolbox.register("select", tools.selTournament, tournsize=3)
+    pool = multiprocessing.Pool()
+    toolbox.register("map", pool.map)
     toolbox.register("evaluate", evaluate, ref_img=ref_img_array)
 
-    CXPB = 0.5
-    MUTPB = 0.2
+    hof = tools.HallOfFame(generations)
     pop = toolbox.population(n=pop_size)
 
-    # Evaluate the entire population
-    fitnesses = map(toolbox.evaluate, pop)
-    for ind, fit in zip(pop, fitnesses):
-        ind.fitness.values = fit
+    stats = tools.Statistics(lambda ind: ind.fitness.values)
+    stats.register("avg", np.mean)
+    stats.register("std", np.std)
+    stats.register("min", np.min)
+    stats.register("max", np.max)
 
-    for g in range(generations):
-        # Select the next generation individuals
-        offspring = toolbox.select(pop, len(pop))
-        # Clone the selected individuals
-        offspring = list(map(toolbox.clone, offspring))
-
-        # Apply crossover and mutation on the offspring
-        for child1, child2 in zip(offspring[::2], offspring[1::2]):
-            if random.random() < CXPB:
-                toolbox.mate(child1, child2)
-                del child1.fitness.values
-                del child2.fitness.values
-
-        for mutant in offspring:
-            if random.random() < MUTPB:
-                toolbox.mutate(mutant)
-                del mutant.fitness.values
-
-        # Evaluate the individuals with an invalid fitness
-        invalid_ind = [ind for ind in offspring if not ind.fitness.valid]
-        fitnesses = list(map(toolbox.evaluate, invalid_ind))
-        for ind, fit in zip(invalid_ind, fitnesses):
-            ind.fitness.values = fit
-
-        # The population is entirely replaced by the offspring
-        pop[:] = offspring
-
-    pass
+    pop, log = algorithms.eaSimple(pop, toolbox, cxpb=0.5, mutpb=0.2, ngen=generations,
+                                   stats=stats, halloffame=hof, verbose=True)
+    best = express_genome_to_image(hof[0], ref_img_array.shape)
+    best.save(output_file)
 
 
 if __name__ == "__main__":
