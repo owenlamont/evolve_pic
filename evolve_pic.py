@@ -8,12 +8,13 @@ from deap import base, creator, tools, algorithms
 from PIL import Image
 import numpy as np
 import multiprocessing
+import pickle
 
 
 from pathlib import Path
 from tqdm.auto import trange
 
-GENE_SIZE: int = 12 # 4 2D vertices and RGBA
+GENE_SIZE: int = 11 # 4 2D vertices and RGB
 
 
 def evaluate(individual: List[float], ref_img: np.ndarray) -> Tuple[float]:
@@ -25,21 +26,37 @@ def evaluate(individual: List[float], ref_img: np.ndarray) -> Tuple[float]:
     return error.item(),
 
 
+# def express_genome_to_image(individual: np.ndarray, im_shape):
+#     individual_bounded = np.clip(individual, 0, 1)
+#     create_gen_img_array = np.zeros(im_shape, dtype=np.uint8)
+#     gen_img = Image.fromarray(create_gen_img_array)
+#     genome_size = len(individual_bounded) // GENE_SIZE
+#     for i in range(genome_size):
+#         color = np.rint(individual_bounded[i + 8:i + GENE_SIZE].copy() * 255).astype(np.uint8)
+#         poly = individual_bounded[i * GENE_SIZE:i * GENE_SIZE + 8].copy().reshape(-1, 2)
+#         poly[:, 0] = np.rint(poly[:, 0] * im_shape[0])
+#         poly[:, 1] = np.rint(poly[:, 1] * im_shape[1])
+#         create_img_array = np.zeros(im_shape, dtype=np.uint8)
+#         rr, cc = polygon(poly[:, 0], poly[:, 1], create_img_array.shape)
+#         create_img_array[rr, cc] = color
+#         layer = Image.fromarray(create_img_array)
+#         gen_img.paste(layer, (0, 0), layer)
+#     return gen_img
+
 def express_genome_to_image(individual: np.ndarray, im_shape):
     individual_bounded = np.clip(individual, 0, 1)
     create_gen_img_array = np.zeros(im_shape, dtype=np.uint8)
-    gen_img = Image.fromarray(create_gen_img_array)
     genome_size = len(individual_bounded) // GENE_SIZE
     for i in range(genome_size):
-        color = np.rint(individual_bounded[i + 8:i + 12].copy() * 255).astype(np.uint8)
-        poly = individual_bounded[i * 12:i * 12 + 8].copy().reshape(-1, 2)
+        color = np.array([255, 255, 255, 255])
+        color[:3] = np.rint(individual_bounded[i + 8:i + GENE_SIZE].copy() * 255).astype(np.uint8)
+        poly = individual_bounded[i * GENE_SIZE:i * GENE_SIZE + 8].copy().reshape(-1, 2)
         poly[:, 0] = np.rint(poly[:, 0] * im_shape[0])
         poly[:, 1] = np.rint(poly[:, 1] * im_shape[1])
         create_img_array = np.zeros(im_shape, dtype=np.uint8)
         rr, cc = polygon(poly[:, 0], poly[:, 1], create_img_array.shape)
-        create_img_array[rr, cc] = color
-        layer = Image.fromarray(create_img_array)
-        gen_img.paste(layer, (0, 0), layer)
+        create_gen_img_array[rr, cc] = color
+    gen_img = Image.fromarray(create_gen_img_array)
     return gen_img
 
 
@@ -58,8 +75,6 @@ def main(input_file: Path, output_file: Path, genome_size: int, pop_size: int, g
     :param pop_size: Size of the population to evolve
     :param generations: Number of generations to optimise over
     """
-    pool = multiprocessing.Pool(processes=16)
-    toolbox.register("map", pool.map)
     img = Image.open(input_file)
     ref_img_array = np.array(img)
 
@@ -68,14 +83,21 @@ def main(input_file: Path, output_file: Path, genome_size: int, pop_size: int, g
                      toolbox.attribute, n=genome_size * GENE_SIZE)
     toolbox.register("population", tools.initRepeat, list, toolbox.individual)
     toolbox.register("mate", tools.cxTwoPoint)
-    toolbox.register("mutate", tools.mutGaussian, mu=0, sigma=0.1, indpb=0.1)
+    #toolbox.register("mutate", tools.mutGaussian, mu=0, sigma=0.1, indpb=0.1)
+    toolbox.register("mutate", tools.mutPolynomialBounded, eta=0.1, low=0, up=1, indpb=0.1)
     toolbox.register("select", tools.selTournament, tournsize=3)
     pool = multiprocessing.Pool()
     toolbox.register("map", pool.map)
     toolbox.register("evaluate", evaluate, ref_img=ref_img_array)
 
     hof = tools.HallOfFame(generations)
-    pop = toolbox.population(n=pop_size)
+
+    pop_pickle = Path("pop.pkl")
+    if pop_pickle.is_file():
+        with open(pop_pickle, "rb") as pop_file:
+            pop = pickle.load(pop_file)
+    else:
+        pop = toolbox.population(n=pop_size)
 
     stats = tools.Statistics(lambda ind: ind.fitness.values)
     stats.register("avg", np.mean)
@@ -85,6 +107,8 @@ def main(input_file: Path, output_file: Path, genome_size: int, pop_size: int, g
 
     pop, log = algorithms.eaSimple(pop, toolbox, cxpb=0.5, mutpb=0.2, ngen=generations,
                                    stats=stats, halloffame=hof, verbose=True)
+    with open("pop.pkl", "wb") as pop_file:
+        pickle.dump(pop, pop_file)
     best = express_genome_to_image(hof[0], ref_img_array.shape)
     best.save(output_file)
 
@@ -105,13 +129,13 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "pop_size",
-        help="The width of the columns in the spreadsheet",
+        help="The size of the population to evolve",
         type=int,
         default=10,
     )
     parser.add_argument(
         "generations",
-        help="The height of the rows in the spreadsheet",
+        help="The number of generations over which to evolve",
         type=int,
         default=10,
     )
